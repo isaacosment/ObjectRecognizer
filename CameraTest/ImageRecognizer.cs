@@ -22,16 +22,12 @@ public class ImageRecognizer
 
     public void Load()
     {
-        _sourceImages = LoadSourceImages(SourceDirectory);
-
-        var images = _sourceImages.Select(s => s.Image).ToList();
-        _sourceFeatures = ComputeFeaturesForImages(images);
+        _sourceImages = LoadSourceImages(SourceDirectory).ToList();
+        ComputeFeaturesForImages(_sourceImages);
     }
 
-    private static List<SourceImage> LoadSourceImages(string directoryPath)
+    private static IEnumerable<SourceImage> LoadSourceImages(string directoryPath, string? subdirectory = null)
     {
-        var images = new List<SourceImage>();
-
         // Check if the directory exists
         if (!Directory.Exists(directoryPath))
         {
@@ -39,47 +35,57 @@ public class ImageRecognizer
         }
 
         // Get all jpeg files in the directory
+        string[] directories = Directory.GetDirectories(directoryPath);
+
+        foreach (var directory in directories)
+        {
+            var directoryName = Path.GetFileNameWithoutExtension(directory);
+            foreach (var image in LoadSourceImages(directory, directoryName))
+                yield return image;
+        }
+
+        // Get all jpeg files in the directory
         string[] fileEntries = Directory.GetFiles(directoryPath, "*.jpg");
         foreach (var filePath in fileEntries)
         {
+            SourceImage? sourceImage = null;
             try
             {
                 // Load the image and add to the list
                 var image = new Image<Bgr, byte>(filePath);
-                images.Add(new(filePath, image));
+                sourceImage = new SourceImage(filePath, image, subdirectory);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error loading image {filePath}: {ex.Message}");
             }
-        }
 
-        return images;
+            if (sourceImage is not null)
+                yield return sourceImage;
+        }
     }
 
-    private static List<(VectorOfKeyPoint, Mat)> ComputeFeaturesForImages(List<Image<Bgr, byte>> images)
+    private static void ComputeFeaturesForImages(IEnumerable<SourceImage> images)
     {
-        var featuresList = new List<(VectorOfKeyPoint, Mat)>();
         var detector = new ORB();
 
-        foreach (var image in images)
+        foreach (var sourceImage in images)
         {
             var keypoints = new VectorOfKeyPoint();
             var descriptors = new Mat();
-            detector.DetectAndCompute(image, null, keypoints, descriptors, false);
-            featuresList.Add((keypoints, descriptors));
-        }
+            var image = sourceImage.Image;
 
-        return featuresList;
+            detector.DetectAndCompute(image, null, keypoints, descriptors, false);
+            sourceImage.Keypoints = keypoints;
+            sourceImage.Descriptors = descriptors;
+        }
     }
 
     public string SourceDirectory { get; }
 
     private bool _running = false;
     private Thread _runThread;
-    private Task _runTask;
     private List<SourceImage> _sourceImages;
-    private List<(VectorOfKeyPoint, Mat)> _sourceFeatures;
 
 
     public void Start()
@@ -129,22 +135,24 @@ public class ImageRecognizer
             detector.DetectAndCompute(frame, null, frameKeypoints, frameDescriptors, false);
 
             double bestScore = 0;
-            int bestMatchIndex = -1;
 
-            for (int i = 0; i < _sourceFeatures.Count; i++)
+            SourceImage? bestMatch = null;
+
+            for (int i = 0; i < _sourceImages.Count; i++)
             {
-                var feature = _sourceFeatures[i];
-                matcher.Match(frameDescriptors, feature.Item2, matches);
+                var image = _sourceImages[i];
+                var descriptors = image.Descriptors;
+                matcher.Match(frameDescriptors, descriptors, matches);
 
                 double score = CalculateScore(matches);
                 if (score > bestScore && score > 20)
                 {
                     bestScore = score;
-                    bestMatchIndex = i;
+                    bestMatch = image;
                 }
             }
 
-            if (bestMatchIndex == -1)
+            if (bestMatch is null)
             {
                 //Console.WriteLine("No good match found.");
                 continue;
@@ -153,9 +161,7 @@ public class ImageRecognizer
             // Display or use the matched source image
             // sourceImages[bestMatchIndex] is the best match
 
-            var matchedImage = _sourceImages[bestMatchIndex];
-
-            var filename = Path.GetFileNameWithoutExtension(matchedImage.Path);
+            var filename = bestMatch.Subdirectory ?? Path.GetFileNameWithoutExtension(bestMatch.Path);
 
             //LogIfChanged($"Matched image {matchedImage.Path} score: {bestScore}");
             LogIfChanged($"Matched image: {filename}");
